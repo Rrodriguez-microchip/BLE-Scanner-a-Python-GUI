@@ -1,3 +1,16 @@
+"""BLE Scanner GUI Application
+
+A comprehensive Bluetooth Low Energy (BLE) scanner application with GUI interface.
+
+Features:
+- Device scanning and discovery
+- Connection management with pairing/unpairing
+- Service and characteristic exploration
+- Data read/write operations
+- Real-time notifications with polling fallback
+- Comprehensive logging and error handling
+"""
+
 import asyncio
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
@@ -6,209 +19,324 @@ import threading
 import time
 from datetime import datetime
 import sys
+from typing import Dict, Any, Optional, List, Callable
+from functools import wraps
 
-class BluetoothManager:
-    """Handles all Bluetooth Low Energy operations"""
+# Configuration constants
+SCAN_TIMEOUT = 2.0  # Seconds for each scan cycle
+SCAN_INTERVAL = 2.0  # Seconds between scan cycles
+POLLING_INTERVAL = 0.5  # Seconds between polling reads
+NOTIFICATION_CHECK_INTERVAL = 0.1  # Seconds between notification queue checks
+CLEANUP_TIMEOUT = 2.0  # Seconds to wait for cleanup completion
+DEFAULT_RSSI = -50  # Default RSSI value when not available
+
+# GUI configuration
+WIDTH = 800
+HEIGHT = 800
+TREE_HEIGHT = 15
+SERVICES_TEXT_HEIGHT = 10
+RECEIVED_TEXT_HEIGHT = 8
+LOG_TEXT_HEIGHT = 6
+
+
+def run_async(func):
+    """Decorator to run async functions in a dedicated event loop thread.
     
-    def __init__(self, callback_manager):
-        self.callback_manager = callback_manager
-        self.scanning = False
-        self.devices = {}
-        self.client = None
-        self.connected = False
-        self.selected_characteristic = None
-        self.notification_active = False
-        self.paired = False
-        self.paired_devices = set()  # Track devices we paired during this session
-        
-    def start_scan(self):
-        """Start BLE device scanning"""
-        self.scanning = True
-        self.devices.clear()
-        self.callback_manager.on_scan_started()
-        
-        # Run scan in background thread
-        thread = threading.Thread(target=self._scan_devices_simple, daemon=True)
-        thread.start()
-    
-    def stop_scan(self):
-        """Stop BLE device scanning"""
-        self.scanning = False
-        self.callback_manager.on_scan_stopped()
-    
-    def _scan_devices_simple(self):
-        """Simple scanning without return_adv to avoid issues"""
-        async def scan_loop():
-            while self.scanning:
-                try:
-                    devices = await BleakScanner.discover(timeout=2.0)
-                    for device in devices:
-                        if device.address not in self.devices:
-                            self.devices[device.address] = {
-                                'name': device.name or "Unknown",
-                                'address': device.address,
-                                'rssi': -50,  # Default value
-                                'device': device
-                            }
-                            self.callback_manager.on_devices_updated(self.devices)
-                    
-                    if self.scanning:
-                        await asyncio.sleep(2)
-                        
-                except Exception as e:
-                    error_msg = f"Scan error: {str(e)}"
-                    self.callback_manager.on_error(error_msg)
-                    break
-        
-        try:
+    Each decorated function will automatically run in its own event loop.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        def thread_target():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(scan_loop())
-        except Exception as e:
-            error_msg = f"Scanner thread error: {str(e)}"
-            self.callback_manager.on_error(error_msg)
-        finally:
             try:
-                loop.close()
-            except:
-                pass
-    
-    def connect_to_device(self, device_address):
-        """Connect to selected device"""
-        if device_address not in self.devices:
-            return
-        
-        device_info = self.devices[device_address]
-        self.callback_manager.on_connection_started(device_info)
-        
-        # Run connection in background thread
-        thread = threading.Thread(target=self._connect_simple, args=(device_address,), daemon=True)
-        thread.start()
-    
-    def _connect_simple(self, device_address):
-        """Simple connection method"""
-        async def connect():
-            try:
-                self.client = BleakClient(device_address)
-                await self.client.connect()
-                
-                self.connected = True
-                device_info = self.devices[device_address]
-                self.callback_manager.on_connected(device_info)
-                
-                # Get services and characteristics
-                try:
-                    services = self.client.services
-                    self.callback_manager.on_services_discovered(services)
-                except Exception:
-                    self.callback_manager.on_message("Connected - services will be loaded when available")
-                
-            except Exception as e:
-                error_msg = str(e)
-                self.callback_manager.on_connection_failed(error_msg)
-        
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(connect())
-        except Exception as e:
-            error_msg = str(e)
-            self.callback_manager.on_connection_failed(error_msg)
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-    
-    def disconnect_from_device(self):
-        """Disconnect from current device"""
-        if self.client:
-            self.notification_active = False
-            thread = threading.Thread(target=self._disconnect_simple, daemon=True)
-            thread.start()
-    
-    def _disconnect_simple(self):
-        """Simple disconnect method"""
-        async def disconnect():
-            try:
-                if self.client:
-                    await self.client.disconnect()
-                self.callback_manager.on_disconnected()
-            except Exception as e:
-                error_msg = f"Disconnect error: {str(e)}"
-                self.callback_manager.on_error(error_msg)
-        
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(disconnect())
-        except Exception as e:
-            error_msg = f"Disconnect thread error: {str(e)}"
-            self.callback_manager.on_error(error_msg)
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-    
-    def pair_device(self):
-        """Attempt to pair with the device"""
-        if not self.client:
-            return
-        
-        self.callback_manager.on_pairing_started()
-        
-        def pair_thread():
-            async def pair():
-                try:
-                    await self.client.pair()
-                    self.paired = True
-                    # Track that we paired this device
-                    if self.client.address:
-                        self.paired_devices.add(self.client.address)
-                    self.callback_manager.on_paired_successfully()
-                    
-                except Exception as e:
-                    error_msg = f"Pairing failed: {str(e)}"
-                    self.callback_manager.on_pairing_failed(error_msg)
-            
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(pair())
-            except Exception as e:
-                error_msg = f"Pair thread error: {str(e)}"
-                self.callback_manager.on_pairing_failed(error_msg)
+                loop.run_until_complete(func(*args, **kwargs))
             finally:
                 try:
                     loop.close()
                 except:
                     pass
         
-        thread = threading.Thread(target=pair_thread, daemon=True)
+        thread = threading.Thread(target=thread_target, daemon=True)
         thread.start()
     
-    def unpair_device(self):
-        """Attempt to unpair from the device"""
+    return wrapper
+
+
+def get_timestamp() -> str:
+    """Get current timestamp in HH:MM:SS format."""
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def format_data_message(data: bytes, message_type: str) -> str:
+    """Format BLE data with timestamp and type.
+    
+    Args:
+        data: Raw bytes received from BLE device
+        message_type: Type of message (Read, Notification, Polled, etc.)
+        
+    Returns:
+        Formatted message string with timestamp
+    """
+    timestamp = get_timestamp()
+    
+    try:
+        # Try UTF-8 decoding first
+        decoded_str = data.decode('utf-8')
+        return f"[{timestamp}] {message_type}: '{decoded_str}'\n"
+    except UnicodeDecodeError:
+        # Fall back to hex representation for binary data
+        hex_str = ' '.join([f'{b:02x}' for b in data])
+        return f"[{timestamp}] {message_type} (hex): {hex_str}\n"
+
+
+class BluetoothManager:
+    """Handles all Bluetooth Low Energy operations.
+    
+    This class manages BLE device scanning, connection, pairing, and communication.
+    It uses async operations run in background threads to prevent GUI blocking.
+    All operations provide callbacks to the GUI for status updates.
+    
+    Attributes:
+        callback_manager: GUI interface for status updates and user notifications
+        scanning: Flag indicating if device scanning is active
+        devices: Dictionary of discovered devices {address: device_info}
+        client: Current BleakClient connection object
+        connected: Flag indicating if a device is currently connected
+        selected_characteristic: Currently selected BLE characteristic for operations
+        notification_active: Flag indicating if notifications are active
+        paired: Flag indicating if current device is paired
+        paired_devices: Set of device addresses paired during this session
+    """
+    
+    def __init__(self, callback_manager: 'BLEGUIApp') -> None:
+        """Initialize the Bluetooth manager.        
+        Args:
+            callback_manager: GUI application instance that implements callback methods
+        """
+        self.callback_manager = callback_manager
+        self.scanning = False
+        self.devices: Dict[str, Dict[str, Any]] = {}
+        self.client: Optional[BleakClient] = None
+        self.connected = False
+        self.selected_characteristic = None
+        self.notification_active = False
+        self.paired = False
+        self.paired_devices = set()  # Track devices paired during this session
+        
+    def start_scan(self) -> None:
+        """Start BLE device scanning.
+        
+        Initiates continuous scanning for BLE devices. 
+        Clears existing device list.
+        Starts background scanning thread. 
+        
+        Updates GUI through callbacks.
+        """
+        self.scanning = True
+        self.devices.clear()
+        self.callback_manager.on_scan_started()
+        
+        # Run scan in background thread to avoid blocking GUI
+        thread = threading.Thread(target=self._scan_devices_simple, daemon=True)
+        thread.start()
+    
+    def stop_scan(self) -> None:
+        """Stop BLE device scanning.
+        
+        Stops the continuous scanning process by setting the scanning flag to False.
+        The background thread will terminate on its next iteration.
+        """
+        self.scanning = False
+        self.callback_manager.on_scan_stopped()
+    
+    @run_async
+    async def _scan_devices_simple(self) -> None:
+        """Background async method for continuous BLE device scanning.
+        
+        Performs continuous scanning using BleakScanner.discover() without advertisement
+        data to avoid compatibility issues. Updates device list and notifies GUI of changes.
+        """
+        while self.scanning:
+            try:
+                # Discover devices with timeout to prevent hanging
+                devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
+                
+                # Process discovered devices
+                for device in devices:
+                    if device.address not in self.devices:
+                        self.devices[device.address] = {
+                            'name': device.name or "Unknown",
+                            'address': device.address,
+                            'rssi': DEFAULT_RSSI,  # Default value since we don't get RSSI in simple scan
+                            'device': device
+                        }
+                        # Notify GUI of device list update
+                        self.callback_manager.on_devices_updated(self.devices)
+                
+                # Wait between scans if still scanning
+                if self.scanning:
+                    await asyncio.sleep(SCAN_INTERVAL)
+                    
+            except Exception as e:
+                error_msg = f"Scan error: {str(e)}"
+                self.callback_manager.on_error(error_msg)
+                break
+    
+    def connect_to_device(self, device_address: str) -> None:
+        """        
+        Args:
+            device_address: MAC address of the device to connect to
+            
+        Note:
+            Connection runs in background thread to prevent GUI blocking.
+            GUI is updated through callbacks during the connection process.
+        """
+        if device_address not in self.devices:
+            self.callback_manager.on_error(f"Device {device_address} not found in discovered devices")
+            return
+        
+        device_info = self.devices[device_address]
+        self.callback_manager.on_connection_started(device_info)
+        
+        # Run connection in background thread to avoid blocking GUI
+        thread = threading.Thread(target=self._connect_simple, args=(device_address,), daemon=True)
+        thread.start()
+    
+    @run_async
+    async def _connect_simple(self, device_address: str) -> None:
+        """Background async method for BLE device connection.
+        Args:
+            device_address: MAC address of the device to connect to
+        """
+        try:
+            # Create and establish BLE client connection
+            self.client = BleakClient(device_address)
+            await self.client.connect()
+            
+            # Update connection status
+            self.connected = True
+            device_info = self.devices[device_address]
+            self.callback_manager.on_connected(device_info)
+            
+            # Attempt to discover services and characteristics
+            try:
+                services = self.client.services
+                self.callback_manager.on_services_discovered(services)
+            except Exception as service_error:
+                # Service discovery may fail on some devices, but connection is still valid
+                self.callback_manager.on_message(
+                    f"Connected - services discovery failed: {service_error}. "
+                    "Services will be loaded when available."
+                )
+            
+        except Exception as e:
+            error_msg = f"Connection failed: {str(e)}"
+            self.callback_manager.on_connection_failed(error_msg)
+    
+    def disconnect_from_device(self) -> None:
+        """Disconnect from the currently connected BLE device.
+        
+        Stops any active notifications and initiates disconnection in background thread.
+        Updates GUI state through callbacks upon completion.
+        """
+        if self.client:
+            # Stop notifications before disconnecting
+            self.notification_active = False
+            thread = threading.Thread(target=self._disconnect_simple, daemon=True)
+            thread.start()
+        else:
+            self.callback_manager.on_error("No device connected to disconnect from")
+    
+    @run_async
+    async def _disconnect_simple(self) -> None:
+        """Background async method for BLE device disconnection.
+        
+        Handles the disconnection process and updates connection state.
+        Always calls the disconnected callback to ensure GUI state is updated.
+        """
+        try:
+            if self.client:
+                await self.client.disconnect()
+                self.client = None
+                self.connected = False
+                self.paired = False
+                self.selected_characteristic = None
+                
+        except Exception as e:
+            error_msg = f"Disconnect error: {str(e)}"
+            self.callback_manager.on_error(error_msg)
+        finally:
+            # Always update GUI state even if disconnect fails
+            self.callback_manager.on_disconnected()
+    
+    def pair_device(self) -> None:
+        """Initiate pairing with the currently connected BLE device.
+        
+        Pairing may be required for some BLE devices to access certain services
+        or characteristics. This method tracks paired devices for cleanup on exit.
+        
+        Note:
+            Requires an active connection. The device address is added to the
+            paired_devices set for automatic cleanup when the application closes.
+        """
         if not self.client:
+            self.callback_manager.on_error("No device connected for pairing")
+            return
+        
+        self.callback_manager.on_pairing_started()
+        
+        @run_async
+        async def pair_async() -> None:
+            """Async pairing operation."""
+            try:
+                await self.client.pair()
+                self.paired = True
+                
+                # Track paired device for cleanup on application exit
+                if self.client.address:
+                    self.paired_devices.add(self.client.address)
+                    
+                self.callback_manager.on_paired_successfully()
+                
+            except Exception as e:
+                error_msg = f"Pairing failed: {str(e)}"
+                self.callback_manager.on_pairing_failed(error_msg)
+        
+        pair_async()
+    
+    def unpair_device(self) -> None:
+        """Initiate unpairing from the currently connected BLE device.
+        
+        Removes the device from the system's paired device list and updates
+        the internal tracking. The device can still be connected but may lose
+        access to protected services.
+        """
+        if not self.client:
+            self.callback_manager.on_error("No device connected for unpairing")
             return
         
         self.callback_manager.on_unpairing_started()
         
-        def unpair_thread():
-            async def unpair():
+        def unpair_thread() -> None:
+            """Background thread for unpairing operation."""
+            async def unpair() -> None:
+                """Async unpairing handler."""
                 try:
                     await self.client.unpair()
                     self.paired = False
-                    # Remove from our tracked paired devices
+                    
+                    # Remove from tracked paired devices
                     if self.client.address in self.paired_devices:
                         self.paired_devices.remove(self.client.address)
+                        
                     self.callback_manager.on_unpaired_successfully()
                     
                 except Exception as e:
                     error_msg = f"Unpairing failed: {str(e)}"
                     self.callback_manager.on_unpairing_failed(error_msg)
             
+            # Run unpairing in dedicated event loop
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -217,41 +345,71 @@ class BluetoothManager:
                 error_msg = f"Unpair thread error: {str(e)}"
                 self.callback_manager.on_unpairing_failed(error_msg)
             finally:
+                # Clean up event loop
                 try:
                     loop.close()
                 except:
-                    pass
+                    pass  # Ignore cleanup errors
         
         thread = threading.Thread(target=unpair_thread, daemon=True)
         thread.start()
     
-    def cleanup_all_paired_devices(self):
-        """Unpair all devices that were paired during this session"""
+    def cleanup_all_paired_devices(self) -> None:
+        """Clean up all devices paired during this application session.
+        
+        This method is called during application shutdown to ensure no devices
+        remain paired after the application closes. It attempts to unpair each
+        device that was paired during this session.
+        
+        Note:
+            Each device requires a temporary connection to perform unpairing.
+            Failures are logged but don't prevent cleanup of other devices.
+        """
         if not self.paired_devices:
             self.callback_manager.on_message("No devices to unpair")
             return
         
-        self.callback_manager.on_message(f"Unpairing {len(self.paired_devices)} device(s)...")
+        device_count = len(self.paired_devices)
+        self.callback_manager.on_message(f"Unpairing {device_count} device(s)...")
         
-        def cleanup_thread():
-            async def cleanup_all():
-                for device_address in list(self.paired_devices):
+        def cleanup_thread() -> None:
+            """Background thread for cleanup operations."""
+            async def cleanup_all() -> None:
+                """Async cleanup handler that unpairs all tracked devices."""
+                successful_unpairs = 0
+                
+                # Create a copy of the set to avoid modification during iteration
+                devices_to_unpair = list(self.paired_devices)
+                
+                for device_address in devices_to_unpair:
                     try:
-                        # Create a temporary client for each device to unpair
+                        # Create temporary client for unpairing
                         temp_client = BleakClient(device_address)
                         await temp_client.connect()
                         await temp_client.unpair()
                         await temp_client.disconnect()
-                        self.paired_devices.remove(device_address)
+                        
+                        # Remove from tracking set
+                        self.paired_devices.discard(device_address)
+                        successful_unpairs += 1
                         self.callback_manager.on_message(f"Unpaired device: {device_address}")
+                        
                     except Exception as e:
-                        self.callback_manager.on_message(f"Failed to unpair {device_address}: {str(e)}")
+                        self.callback_manager.on_message(
+                            f"Failed to unpair {device_address}: {str(e)}"
+                        )
                 
-                if not self.paired_devices:
+                # Report final status
+                if successful_unpairs == device_count:
                     self.callback_manager.on_message("All devices unpaired successfully")
+                elif successful_unpairs > 0:
+                    self.callback_manager.on_message(
+                        f"Unpaired {successful_unpairs}/{device_count} devices"
+                    )
                 else:
-                    self.callback_manager.on_message("Some devices could not be unpaired")
+                    self.callback_manager.on_message("No devices could be unpaired")
             
+            # Run cleanup in dedicated event loop
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -260,29 +418,56 @@ class BluetoothManager:
                 error_msg = f"Cleanup thread error: {str(e)}"
                 self.callback_manager.on_error(error_msg)
             finally:
+                # Clean up event loop
                 try:
                     loop.close()
                 except:
-                    pass
+                    pass  # Ignore cleanup errors
         
         thread = threading.Thread(target=cleanup_thread, daemon=True)
         thread.start()
     
-    def send_data(self, characteristic, data_str):
-        """Send string data to selected characteristic"""
-        if not characteristic or not self.client:
+    def send_data(self, characteristic, data_str: str) -> None:
+        """Send string data to a BLE characteristic.
+        
+        Args:
+            characteristic: BLE characteristic object with write capability
+            data_str: String data to send (will be UTF-8 encoded)
+            
+        Note:
+            Automatically selects write mode based on characteristic properties:
+            - Uses write-without-response if supported for better performance
+            - Falls back to write-with-response for reliable delivery
+        """
+        if not characteristic:
+            self.callback_manager.on_error("No characteristic selected for sending data")
+            return
+            
+        if not self.client or not self.connected:
+            self.callback_manager.on_error("No device connected for sending data")
             return
         
         self.callback_manager.on_send_started(data_str)
         
-        def write_thread():
-            async def write_data():
+        def write_thread() -> None:
+            """Background thread for write operation."""
+            async def write_data() -> None:
+                """Async write handler that sends data to characteristic."""
                 try:
+                    # Encode string data to bytes
                     data_bytes = data_str.encode('utf-8')
+                    
+                    # Choose write mode based on characteristic capabilities
                     if "write-without-response" in characteristic.properties:
-                        await self.client.write_gatt_char(characteristic.uuid, data_bytes, response=False)
+                        # Fast write without waiting for response
+                        await self.client.write_gatt_char(
+                            characteristic.uuid, data_bytes, response=False
+                        )
                     else:
-                        await self.client.write_gatt_char(characteristic.uuid, data_bytes, response=True)
+                        # Reliable write with response confirmation
+                        await self.client.write_gatt_char(
+                            characteristic.uuid, data_bytes, response=True
+                        )
                     
                     self.callback_manager.on_send_success(data_str)
                     
@@ -290,6 +475,7 @@ class BluetoothManager:
                     error_msg = f"Send failed: {str(e)}"
                     self.callback_manager.on_error(error_msg)
             
+            # Run write operation in dedicated event loop
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -298,33 +484,53 @@ class BluetoothManager:
                 error_msg = f"Write thread error: {str(e)}"
                 self.callback_manager.on_error(error_msg)
             finally:
+                # Clean up event loop
                 try:
                     loop.close()
                 except:
-                    pass
+                    pass  # Ignore cleanup errors
         
         thread = threading.Thread(target=write_thread, daemon=True)
         thread.start()
     
-    def read_data(self, characteristic):
-        """Read data from selected characteristic"""
-        if not characteristic or not self.client:
+    def read_data(self, characteristic) -> None:
+        """Read data from a BLE characteristic.
+        
+        Args:
+            characteristic: BLE characteristic object with read capability
+            
+        Note:
+            Data is automatically decoded as UTF-8 text if possible, otherwise
+            displayed as hexadecimal. Results are timestamped and sent to GUI.
+        """
+        if not characteristic:
+            self.callback_manager.on_error("No characteristic selected for reading data")
+            return
+            
+        if not self.client or not self.connected:
+            self.callback_manager.on_error("No device connected for reading data")
             return
         
         self.callback_manager.on_read_started(characteristic.uuid)
         
-        def read_thread():
-            async def read_data():
+        def read_thread() -> None:
+            """Background thread for read operation."""
+            async def read_data() -> None:
+                """Async read handler that retrieves data from characteristic."""
                 try:
+                    # Read raw data from characteristic
                     data = await self.client.read_gatt_char(characteristic.uuid)
                     
+                    # Format data for display with timestamp
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    
                     try:
+                        # Try to decode as UTF-8 text
                         decoded_str = data.decode('utf-8')
-                        timestamp = datetime.now().strftime("%H:%M:%S")
                         message = f"[{timestamp}] Read: '{decoded_str}'\n"
                     except UnicodeDecodeError:
+                        # Fall back to hex representation for binary data
                         hex_str = ' '.join([f'{b:02x}' for b in data])
-                        timestamp = datetime.now().strftime("%H:%M:%S")
                         message = f"[{timestamp}] Read (hex): {hex_str}\n"
                     
                     self.callback_manager.on_data_received(message)
@@ -333,6 +539,7 @@ class BluetoothManager:
                     error_msg = f"Read failed: {str(e)}"
                     self.callback_manager.on_error(error_msg)
             
+            # Run read operation in dedicated event loop
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -341,71 +548,105 @@ class BluetoothManager:
                 error_msg = f"Read thread error: {str(e)}"
                 self.callback_manager.on_error(error_msg)
             finally:
+                # Clean up event loop
                 try:
                     loop.close()
                 except:
-                    pass
+                    pass  # Ignore cleanup errors
         
         thread = threading.Thread(target=read_thread, daemon=True)
         thread.start()
     
-    def start_notifications(self, characteristic):
-        """Start notifications - Try real notifications first, fall back to polling"""
+    def start_notifications(self, characteristic) -> None:
+        """Start receiving notifications/indications from a BLE characteristic.
+        
+        Args:
+            characteristic: BLE characteristic with notify or indicate capability
+            
+        This method attempts to use real BLE notifications first for optimal
+        performance. If notifications fail, it automatically falls back to
+        polling the characteristic at regular intervals.
+        
+        Note:
+            Sets notification_active flag and stores the characteristic for
+            potential polling fallback. Updates GUI through callbacks.
+        """
         if not characteristic:
+            self.callback_manager.on_error("No characteristic selected for notifications")
+            return
+            
+        if not self.client or not self.connected:
+            self.callback_manager.on_error("No device connected for notifications")
             return
         
         self.selected_characteristic = characteristic
         self.notification_active = True
         self.callback_manager.on_notifications_starting()
         
-        # Try real BLE notifications first
-        def notification_thread():
-            async def try_notifications():
+        def notification_thread() -> None:
+            """Background thread for notification handling."""
+            async def try_notifications() -> None:
+                """Async handler that attempts real BLE notifications with polling fallback."""
                 try:
-                    # Real notification handler
-                    def notification_handler(sender, data):
+                    def notification_handler(sender: int, data: bytearray) -> None:
+                        """Callback for processing incoming BLE notifications.
+                        
+                        Args:
+                            sender: Characteristic handle (unused)
+                            data: Raw notification data
+                        """
                         try:
-                            decoded_str = data.decode('utf-8')
+                            # Format notification data with timestamp
                             timestamp = datetime.now().strftime("%H:%M:%S")
-                            message = f"[{timestamp}] Notification: '{decoded_str}'\n"
-                        except UnicodeDecodeError:
-                            hex_str = ' '.join([f'{b:02x}' for b in data])
-                            timestamp = datetime.now().strftime("%H:%M:%S")
-                            message = f"[{timestamp}] Notification (hex): {hex_str}\n"
+                            
+                            try:
+                                # Try UTF-8 decoding first
+                                decoded_str = data.decode('utf-8')
+                                message = f"[{timestamp}] Notification: '{decoded_str}'\n"
+                            except UnicodeDecodeError:
+                                # Fall back to hex for binary data
+                                hex_str = ' '.join([f'{b:02x}' for b in data])
+                                message = f"[{timestamp}] Notification (hex): {hex_str}\n"
+                                
                         except Exception as e:
+                            # Handle any formatting errors
                             timestamp = datetime.now().strftime("%H:%M:%S")
                             message = f"[{timestamp}] Notification (error): {str(e)}\n"
                         
+                        # Add to notification queue for thread-safe GUI updates
                         if hasattr(self, '_notification_queue'):
                             self._notification_queue.append(message)
                     
-                    # Initialize notification queue
+                    # Initialize thread-safe notification queue
                     self._notification_queue = []
                     
-                    # Try to start real notifications
+                    # Attempt to start BLE notifications
                     await self.client.start_notify(characteristic.uuid, notification_handler)
-                    
                     self.callback_manager.on_notifications_started_real()
                     
-                    # Monitor notification queue
+                    # Process notification queue until stopped
                     while self.notification_active and self.connected:
+                        # Process queued notifications
                         if hasattr(self, '_notification_queue') and self._notification_queue:
                             message = self._notification_queue.pop(0)
                             self.callback_manager.on_data_received(message)
-                        await asyncio.sleep(0.1)
+                            
+                        # Brief pause between queue checks
+                        await asyncio.sleep(NOTIFICATION_CHECK_INTERVAL)
                     
-                    # Stop notifications when done
+                    # Clean up notifications when stopping
                     try:
                         await self.client.stop_notify(characteristic.uuid)
                     except:
-                        pass
+                        pass  # Ignore stop notification errors
                     
                 except Exception as e:
-                    # Fall back to polling if notifications fail
+                    # Fall back to polling if real notifications fail
                     error_msg = f"Notifications failed, falling back to polling: {str(e)}"
                     self.callback_manager.on_message(error_msg)
                     self._start_polling_fallback(characteristic)
             
+            # Run notification handling in dedicated event loop
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -415,150 +656,262 @@ class BluetoothManager:
                 self.callback_manager.on_message(error_msg)
                 self._start_polling_fallback(characteristic)
             finally:
+                # Clean up event loop
                 try:
                     loop.close()
                 except:
-                    pass
+                    pass  # Ignore cleanup errors
         
         thread = threading.Thread(target=notification_thread, daemon=True)
         thread.start()
     
-    def _start_polling_fallback(self, characteristic):
-        """Fallback to polling method"""
+    def _start_polling_fallback(self, characteristic) -> None:
+        """Fallback notification method using periodic characteristic reads.
+        
+        Args:
+            characteristic: BLE characteristic to poll for data changes
+            
+        This method is used when real BLE notifications are not supported or fail.
+        It periodically reads the characteristic value and reports any data found.
+        Less efficient than notifications but provides compatibility with more devices.
+        """
         self.callback_manager.on_notifications_started_polling()
         
-        # Add a test message
+        # Send initial status message
         timestamp = datetime.now().strftime("%H:%M:%S")
-        test_message = f"[{timestamp}] Polling started - waiting for data...\n"
+        test_message = f"[{timestamp}] Polling started - checking for data every {POLLING_INTERVAL}s...\n"
         self.callback_manager.on_data_received(test_message)
         
-        def poll_thread():
+        def poll_thread() -> None:
+            """Background thread that performs periodic characteristic reads."""
             while self.notification_active and self.connected:
                 try:
-                    time.sleep(0.5)  # Poll every 500ms
+                    # Wait between polls
+                    time.sleep(POLLING_INTERVAL)
+                    
+                    # Check if we should continue polling
                     if not self.notification_active or not self.connected:
                         break
                     
-                    async def poll_read():
+                    async def poll_read() -> None:
+                        """Async read operation for polling."""
                         try:
+                            # Verify connection is still valid before reading
                             if self.client and self.connected and self.notification_active:
+                                # Read current characteristic value
                                 data = await self.client.read_gatt_char(characteristic.uuid)
                                 
+                                # Format polled data with timestamp
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                
                                 try:
+                                    # Try UTF-8 decoding
                                     decoded_str = data.decode('utf-8')
-                                    timestamp = datetime.now().strftime("%H:%M:%S")
                                     message = f"[{timestamp}] Polled: '{decoded_str}'\n"
                                 except UnicodeDecodeError:
+                                    # Use hex representation for binary data
                                     hex_str = ' '.join([f'{b:02x}' for b in data])
-                                    timestamp = datetime.now().strftime("%H:%M:%S")
                                     message = f"[{timestamp}] Polled (hex): {hex_str}\n"
                                 
+                                # Send to GUI if still active
                                 if self.notification_active:
                                     self.callback_manager.on_data_received(message)
-                        except:
-                            pass  # Ignore read errors during polling
+                                    
+                        except Exception:
+                            # Silently ignore read errors during polling
+                            # This is normal if device disconnects or characteristic becomes unavailable
+                            pass
                     
+                    # Execute async read in temporary event loop
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
                         loop.run_until_complete(poll_read())
                     finally:
+                        # Clean up temporary event loop
                         try:
                             loop.close()
                         except:
-                            pass
+                            pass  # Ignore cleanup errors
                             
                 except Exception:
+                    # Exit polling thread on any major errors
                     break
         
         thread = threading.Thread(target=poll_thread, daemon=True)
         thread.start()
     
-    def stop_notifications(self):
-        """Stop notifications"""
+    def stop_notifications(self) -> None:
+        """Stop active notifications or polling.
+        
+        Sets the notification_active flag to False, which signals background
+        threads to stop processing notifications or polling operations.
+        """
         self.notification_active = False
         self.callback_manager.on_notifications_stopped()
     
-    def cleanup(self):
-        """Clean up resources and unpair devices"""
+    def cleanup(self) -> None:
+        """Clean up all BLE resources and unpair devices.
+        
+        This method is called during application shutdown to ensure proper
+        cleanup of BLE connections and remove any paired devices from the system.
+        
+        Note:
+            Stops all active operations and gives cleanup time to complete
+            before the application fully exits.
+        """
+        # Stop all active BLE operations
         self.scanning = False
         self.notification_active = False
         
-        # Unpair all devices we paired during this session
+        # Clean up paired devices if any exist
         if self.paired_devices:
             self.cleanup_all_paired_devices()
-            # Give cleanup time to complete
-            time.sleep(1.0)
+            # Allow cleanup operations time to complete
+            time.sleep(CLEANUP_TIMEOUT)
 
 
 class BLEGUIApp:
-    """Handles the graphical user interface"""
+    """Main GUI application class for BLE Scanner.
     
-    def __init__(self):
+    This class creates and manages the complete graphical user interface for the
+    BLE scanner application. It provides device discovery, connection management,
+    service exploration, and data communication capabilities through a user-friendly
+    tabbed interface.
+    
+    The class implements the callback interface required by BluetoothManager to
+    receive status updates and data from BLE operations.
+    
+    Attributes:
+        root: Main Tkinter window
+        bluetooth: BluetoothManager instance for BLE operations
+        selected_device_address: MAC address of currently selected device
+        selected_characteristic: Currently selected BLE characteristic for operations
+        
+        GUI Components:
+        - device_tree: TreeView showing discovered devices
+        - services_text: Text widget displaying device services
+        - char_combo: Combobox for characteristic selection
+        - received_text: Text widget showing received data
+        - log_text: Text widget for application logs
+        - Various buttons for BLE operations
+    """
+    
+    def __init__(self) -> None:
+        """Initialize the BLE GUI application.
+        
+        Creates the main window, initializes the Bluetooth manager,
+        and sets up the complete user interface.
+        """
+        # Create main application window
         self.root = tk.Tk()
         self.root.title("LightBlue-style BLE Scanner")
-        self.root.geometry("800x800")
+        self.root.geometry(f"{WIDTH}x{HEIGHT}")
         
-        # Initialize Bluetooth manager with callback interface
+        # Initialize Bluetooth manager with this app as callback handler
         self.bluetooth = BluetoothManager(self)
         
-        # GUI state variables
-        self.selected_device_address = None
+        # GUI state tracking variables
+        self.selected_device_address: Optional[str] = None
         self.selected_characteristic = None
         
+        # Build the complete user interface
         self.setup_ui()
         
-    def setup_ui(self):
-        """Set up the complete user interface"""
-        # Main frame
+    def setup_ui(self) -> None:
+        """Build the complete user interface.
+        
+        Creates a responsive layout with:
+        - Header with application title
+        - Left panel for device discovery and selection
+        - Right panel for device details and communication
+        - Bottom log panel for status messages and errors
+        """
+        # Create main container frame with padding
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # Configure grid weights
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(1, weight=1)
+        # Configure responsive grid layout
+        self.root.columnconfigure(0, weight=1)  # Main frame expands
+        self.root.rowconfigure(0, weight=1)     # Main frame expands
+        main_frame.columnconfigure(1, weight=1)  # Right panel expands
+        main_frame.rowconfigure(1, weight=1)     # Device panels expand
         
+        # Build UI components in order
         self._setup_header(main_frame)
         self._setup_left_panel(main_frame)
         self._setup_right_panel(main_frame)
         self._setup_log_panel(main_frame)
         
-    def _setup_header(self, parent):
-        """Set up the header section"""
-        title_label = ttk.Label(parent, text="BLE Device Scanner", font=("Arial", 16, "bold"))
+    def _setup_header(self, parent: ttk.Frame) -> None:
+        """Create the application header with title.
+        
+        Args:
+            parent: Parent frame to contain the header
+        """
+        title_label = ttk.Label(
+            parent, 
+            text="BLE Device Scanner", 
+            font=("Arial", 16, "bold")
+        )
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 10))
     
-    def _setup_left_panel(self, parent):
-        """Set up the left panel with device list"""
+    def _setup_left_panel(self, parent: ttk.Frame) -> None:
+        """Create the left panel for device discovery and selection.
+        
+        Args:
+            parent: Parent frame to contain the left panel
+            
+        Creates:
+        - Scan control button
+        - Device list with name, address, and RSSI columns
+        - Scrollbar for device list navigation
+        """
+        # Create labeled frame for device discovery
         left_frame = ttk.LabelFrame(parent, text="Discovered Devices", padding="10")
         left_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
-        left_frame.columnconfigure(0, weight=1)
-        left_frame.rowconfigure(1, weight=1)
+        left_frame.columnconfigure(0, weight=1)  # Tree expands horizontally
+        left_frame.rowconfigure(1, weight=1)     # Tree expands vertically
         
-        # Scan button
-        self.scan_button = ttk.Button(left_frame, text="Start Scan", command=self._toggle_scan)
+        # Scan control button
+        self.scan_button = ttk.Button(
+            left_frame, 
+            text="Start Scan", 
+            command=self._toggle_scan
+        )
         self.scan_button.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        # Device tree
+        # Device discovery results tree view
         columns = ("name", "address", "rssi")
-        self.device_tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=15)
-        self.device_tree.heading("name", text="Name")
-        self.device_tree.heading("address", text="Address")
-        self.device_tree.heading("rssi", text="RSSI")
+        self.device_tree = ttk.Treeview(
+            left_frame, 
+            columns=columns, 
+            show="headings", 
+            height=TREE_HEIGHT
+        )
         
-        self.device_tree.column("name", width=150)
-        self.device_tree.column("address", width=120)
-        self.device_tree.column("rssi", width=60)
+        # Configure column headers and widths
+        self.device_tree.heading("name", text="Device Name")
+        self.device_tree.heading("address", text="MAC Address")
+        self.device_tree.heading("rssi", text="Signal")
         
-        # Scrollbar for tree
-        tree_scroll = ttk.Scrollbar(left_frame, orient="vertical", command=self.device_tree.yview)
+        self.device_tree.column("name", width=150, minwidth=100)
+        self.device_tree.column("address", width=120, minwidth=100)
+        self.device_tree.column("rssi", width=60, minwidth=50)
+        
+        # Vertical scrollbar for device list
+        tree_scroll = ttk.Scrollbar(
+            left_frame, 
+            orient="vertical", 
+            command=self.device_tree.yview
+        )
         self.device_tree.configure(yscrollcommand=tree_scroll.set)
         
+        # Position tree and scrollbar
         self.device_tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         tree_scroll.grid(row=1, column=1, sticky=(tk.N, tk.S))
         
+        # Bind device selection event
         self.device_tree.bind("<<TreeviewSelect>>", self._on_device_select)
     
     def _setup_right_panel(self, parent):
